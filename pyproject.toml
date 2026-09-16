@@ -9,7 +9,10 @@ dependencies = [
     "langchain>=1.4.0",
     "langgraph>=1.2.11",
     "numpy>=2.5.3",
+    "python-dotenv>=1.2.3",
     "slowapi>=0.1.10",
     "sqlalchemy>=2.0.53",
     "sqlmodel>=0.0.42",
+    "supabase>=2.31.0",
+    "usearch>=2.26.2",
 ]

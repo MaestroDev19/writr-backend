@@ -8,3 +8,9 @@ wheels/
 
 # Virtual environments
 .venv
+
+.env
+
+.agents/
+.bob/
+skills-lock.json
