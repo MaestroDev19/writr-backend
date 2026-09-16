@@ -15,4 +15,5 @@ dependencies = [
     "sqlmodel>=0.0.42",
     "supabase>=2.31.0",
     "usearch>=2.26.2",
+    "uuid>=1.30",
 ]
