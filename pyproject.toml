@@ -7,8 +7,10 @@ requires-python = ">=3.14"
 dependencies = [
     "fastapi[standard]>=0.141.1",
     "langchain>=1.4.0",
+    "langchain-ollama>=1.1.0",
     "langgraph>=1.2.11",
     "numpy>=2.5.3",
+    "pydantic-settings>=2.0.0",
     "python-dotenv>=1.2.3",
     "slowapi>=0.1.10",
     "sqlalchemy>=2.0.53",
@@ -17,3 +19,6 @@ dependencies = [
     "usearch>=2.26.2",
     "uuid>=1.30",
 ]
+
+[tool.fastapi]
+entrypoint = "main:app"
