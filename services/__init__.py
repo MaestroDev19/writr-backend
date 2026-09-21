@@ -1,3 +1,4 @@
+from services.embeddings import embed_documents, embed_query, get_genai_client
 from services.supabase import (
     AsyncSupabaseClient,
     AsyncSupabaseDep,
@@ -22,4 +23,7 @@ __all__ = [
     "get_current_user",
     "CurrentUserDep",
     "CurrentUser",
+    "embed_documents",
+    "embed_query",
+    "get_genai_client",
 ]

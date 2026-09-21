@@ -1,28 +1,23 @@
-import os
+from collections.abc import AsyncIterator
 from typing import Annotated
-from dotenv import load_dotenv
+
 from fastapi import Depends, HTTPException, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
-from supabase import AsyncClient, Client, create_async_client, create_client
+from supabase import AsyncClient, AsyncClientOptions, Client, create_async_client, create_client
 from supabase_auth.errors import AuthApiError
 from supabase_auth.types import User
 
+from core.config import get_settings
 from utils.log import logger
-
-load_dotenv()
 
 
 def _get_supabase_credentials() -> tuple[str, str]:
-    """Retrieve Supabase URL and API Key from environment variables."""
-    url = os.getenv("SUPABASE_URL")
-    key = (
-        os.getenv("SUPABASE_PUBLISHABLE_KEY")
-        or os.getenv("SUPABASE_ANON_KEY")
-        or os.getenv("SUPABASE_KEY")
-        or os.getenv("SUPABASE__PUBLISHABLE_KEY")
-    )
+    """Retrieve Supabase URL and publishable key from Settings."""
+    settings = get_settings()
+    url = settings.supabase_url
+    key = settings.supabase_api_key
     if not url or not key:
-        logger.error("Supabase URL or Publishable/Anon Key is missing in environment variables.")
+        logger.error("Supabase URL or publishable key is missing in Settings.")
         raise ValueError("SUPABASE_URL and SUPABASE_PUBLISHABLE_KEY must be set in environment variables.")
     return url, key
 
@@ -30,6 +25,7 @@ def _get_supabase_credentials() -> tuple[str, str]:
 # Global singleton instances
 _supabase_client: Client | None = None
 _async_supabase_client: AsyncClient | None = None
+_async_service_supabase_client: AsyncClient | None = None
 
 # Attempt module-level sync client initialization on load if credentials exist
 try:
@@ -145,3 +141,71 @@ def get_current_user(
 
 CurrentUserDep = Annotated[User, Depends(get_current_user)]
 CurrentUser = CurrentUserDep
+
+
+def _get_secret_key() -> str:
+    """Backend-only key. Prefer sb_secret_ over the legacy JWT service_role key."""
+    key = get_settings().supabase_admin_key
+    if not key:
+        logger.error("Supabase secret key is missing in Settings.")
+        raise ValueError("SUPABASE_SECRET_KEY must be set in environment variables.")
+    return key
+
+
+async def get_async_service_supabase() -> AsyncClient:
+    """Trusted backend client. Use after JWT auth; always filter writes by owner."""
+    global _async_service_supabase_client
+    if _async_service_supabase_client is None:
+        try:
+            url, _publishable_key = _get_supabase_credentials()
+            secret_key = _get_secret_key()
+            _async_service_supabase_client = await create_async_client(
+                url,
+                secret_key,
+                options=AsyncClientOptions(
+                    persist_session=False,
+                    auto_refresh_token=False,
+                ),
+            )
+            logger.info("Supabase async secret-key client initialized")
+        except Exception as e:
+            logger.error("Failed to initialize Supabase secret-key client: %s", e)
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=f"Supabase service client not initialized: {e}",
+            ) from e
+    return _async_service_supabase_client
+
+
+async def get_async_user_supabase(
+    credentials: Annotated[HTTPAuthorizationCredentials | None, Depends(_bearer_security)],
+) -> AsyncIterator[AsyncClient]:
+    """Per-request client that carries the caller's JWT so RLS applies."""
+    if not credentials or not credentials.credentials:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Missing authentication credentials",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    try:
+        url, key = _get_supabase_credentials()
+        client = await create_async_client(
+            url,
+            key,
+            options=AsyncClientOptions(
+                persist_session=False,
+                auto_refresh_token=False,
+                headers={"Authorization": f"Bearer {credentials.credentials}", "apikey": key},
+            ),
+        )
+    except Exception as e:
+        logger.error("Failed to initialize user-scoped Supabase client: %s", e)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Supabase user client not initialized: {e}",
+        ) from e
+    yield client
+
+
+AsyncServiceSupabaseDep = Annotated[AsyncClient, Depends(get_async_service_supabase)]
+AsyncUserSupabaseDep = Annotated[AsyncClient, Depends(get_async_user_supabase)]
