@@ -19,7 +19,8 @@ class Settings(BaseSettings):
     openai_api_key: str | None = None
     openrouter_api_key: str | None = None
     groq_api_key: str | None = None
-    embedding_model: str = "gemini-embedding-2"
+    gemini_embedding_model: str = "gemini-embedding-2"
+    openai_embedding_model: str = "text-embedding-3-small"
     embedding_dim: int = 768
     chunk_size: int = 800
     chunk_overlap: int = 150
@@ -31,6 +32,7 @@ class Settings(BaseSettings):
     @property
     def supabase_admin_key(self) -> str | None:
         return self.supabase_secret_key or self.supabase_service_role_key
+    
 
 
 @lru_cache(maxsize=1)
