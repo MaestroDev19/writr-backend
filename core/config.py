@@ -24,6 +24,8 @@ class Settings(BaseSettings):
     embedding_dim: int = 768
     chunk_size: int = 800
     chunk_overlap: int = 150
+    atomic_max: int = 2400
+    min_chunk: int = 480
 
     @property
     def supabase_api_key(self) -> str | None:

@@ -10,7 +10,6 @@ wheels/
 .venv
 
 .env
-data/
 
 .agents/
 .bob/
