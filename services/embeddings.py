@@ -1,3 +1,16 @@
+"""
+Embedding helpers for queries and document chunks.
+
+Job of this module: turn text into dense float vectors that can be stored
+in a vector index (e.g. Supabase pgvector) and compared by similarity.
+
+Providers:
+  - Gemini  (GoogleGenerativeAIEmbeddings) — preferred when GEMINI_API_KEY is set
+  - OpenAI  (OpenAIEmbeddings)             — fallback when only OPENAI_API_KEY is set
+
+All public embed methods are async so FastAPI routes never block the event loop.
+"""
+
 import asyncio
 from functools import lru_cache
 from typing import Annotated, Protocol, runtime_checkable
@@ -11,16 +24,19 @@ from utils.log import logger
 
 
 class EmbeddingError(Exception):
-    """Raised when an embedding provider fails to embed text or initialize."""
+    """Raised when an embedding provider fails to embed text or initialize.
+
+    Callers catch this and map it to an HTTP error response.
+    """
 
 
 @runtime_checkable
 class EmbeddingClient(Protocol):
-    """Protocol for embedding clients.
-    
-    Supports standard LangChain embeddings clients providing synchronous
-    `embed_query` / `embed_documents` and optional asynchronous `aembed_query` /
-    `aembed_documents`.
+    """Minimal interface every embedding backend must satisfy.
+
+    Matches LangChain embedding clients:
+      - sync:  embed_query / embed_documents
+      - async: aembed_query / aembed_documents (optional — we fall back to threads)
     """
 
     def embed_query(self, text: str) -> list[float]: ...
@@ -28,11 +44,11 @@ class EmbeddingClient(Protocol):
 
 
 class EmbeddingService:
-    """Service wrapper for generating query and document embeddings.
-    
-    Executes native async embedding if supported by the underlying client;
-    otherwise safely delegates synchronous embedding calls to a worker thread
-    via `asyncio.to_thread` to prevent blocking the event loop.
+    """Thin async wrapper around any EmbeddingClient.
+
+    If the underlying client has native async methods (``aembed_*``), we use
+    them. Otherwise we run the sync methods in a worker thread via
+    ``asyncio.to_thread`` so the FastAPI event loop stays free.
     """
 
     def __init__(self, client: EmbeddingClient) -> None:
@@ -42,19 +58,26 @@ class EmbeddingService:
         )
 
     async def embed_query(self, text: str) -> list[float]:
+        """Embed a single search / chat query string → one vector."""
         if not text or not text.strip():
             raise EmbeddingError("Query text cannot be empty.")
 
         logger.info("Embedding a user query.")
         try:
+            # Prefer native async if the provider offers it.
             if hasattr(self.client, "aembed_query") and callable(self.client.aembed_query):
                 return await self.client.aembed_query(text)
+            # Sync fallback — off the event loop.
             return await asyncio.to_thread(self.client.embed_query, text)
         except Exception as e:
             logger.error(f"Error embedding query: {e}")
             raise EmbeddingError(f"Failed to embed query: {e}") from e
 
     async def embed_documents(self, documents: list[str]) -> list[list[float]]:
+        """Embed many chunk strings → one vector per document (same order).
+
+        Empty input returns ``[]`` immediately (no API call).
+        """
         if not documents:
             return []
 
@@ -69,7 +92,12 @@ class EmbeddingService:
 
 
 class GeminiEmbeddingService(EmbeddingService):
-    """Embedding service using Google Generative AI (Gemini)."""
+    """EmbeddingService backed by Google Generative AI (Gemini).
+
+    Model name and output dimensions come from Settings unless overridden.
+    ``output_dimensionality`` must match the vector column size in the DB
+    (see ``settings.embedding_dim``, typically 768).
+    """
 
     def __init__(self, model: str | None = None, dimensions: int | None = None) -> None:
         settings = get_settings()
@@ -96,7 +124,11 @@ class GeminiEmbeddingService(EmbeddingService):
 
 
 class OpenAIEmbeddingService(EmbeddingService):
-    """Embedding service using OpenAI."""
+    """EmbeddingService backed by OpenAI (e.g. text-embedding-3-small).
+
+    ``dimensions`` must match the vector column size in the DB — same rule
+    as Gemini; both providers should write vectors of ``settings.embedding_dim``.
+    """
 
     def __init__(self, model: str | None = None, dimensions: int | None = None) -> None:
         settings = get_settings()
@@ -122,22 +154,29 @@ class OpenAIEmbeddingService(EmbeddingService):
         logger.info("OpenAIEmbeddingService initialized.")
 
 
+# ---------------------------------------------------------------------------
+# Factories + FastAPI dependencies
+# ---------------------------------------------------------------------------
+
 @lru_cache(maxsize=1)
 def get_gemini_embedding_service() -> GeminiEmbeddingService:
-    """Cached factory for GeminiEmbeddingService."""
+    """Create GeminiEmbeddingService once; reuse for all requests."""
     return GeminiEmbeddingService()
 
 
 @lru_cache(maxsize=1)
 def get_openai_embedding_service() -> OpenAIEmbeddingService:
-    """Cached factory for OpenAIEmbeddingService."""
+    """Create OpenAIEmbeddingService once; reuse for all requests."""
     return OpenAIEmbeddingService()
 
 
 def get_embedding_service(settings: SettingsDep) -> EmbeddingService:
-    """FastAPI dependency to retrieve the configured default EmbeddingService.
+    """Pick the default provider for this deployment.
 
-    Prefers Gemini if `gemini_api_key` is configured, otherwise falls back to OpenAI.
+    Preference order:
+      1. Gemini  — if GEMINI_API_KEY is set
+      2. OpenAI  — if OPENAI_API_KEY is set
+      3. Gemini  — last resort (will raise EmbeddingError if key is missing)
     """
     if settings.gemini_api_key:
         return get_gemini_embedding_service()
@@ -146,19 +185,19 @@ def get_embedding_service(settings: SettingsDep) -> EmbeddingService:
     return get_gemini_embedding_service()
 
 
-# Dependency injection type aliases per FastAPI best practices
+# Route signature helpers: ``service: EmbeddingServiceDep``.
 EmbeddingServiceDep = Annotated[EmbeddingService, Depends(get_embedding_service)]
 GeminiEmbeddingServiceDep = Annotated[GeminiEmbeddingService, Depends(get_gemini_embedding_service)]
 OpenAIEmbeddingServiceDep = Annotated[OpenAIEmbeddingService, Depends(get_openai_embedding_service)]
 
 
 async def embed_query(text: str) -> list[float]:
-    """Convenience helper to embed a single query with the default service."""
+    """One-liner helper: embed a query with the default configured service."""
     service = get_embedding_service(get_settings())
     return await service.embed_query(text)
 
 
 async def embed_documents(documents: list[str]) -> list[list[float]]:
-    """Convenience helper to embed multiple documents with the default service."""
+    """One-liner helper: embed many texts with the default configured service."""
     service = get_embedding_service(get_settings())
     return await service.embed_documents(documents)
